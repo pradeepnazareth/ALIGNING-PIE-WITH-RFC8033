@@ -17,3 +17,8 @@ basic ns-3 (netanim and ns-3-dev) is to type:
 ./build.py
 and cd into ns-3-dev for further work.  Consult the bake documentation
 on how to use bake to access optional ns-3 components.
+
+
+-------------------------------------------------------
+Aligning PIE in ns-3.27 with RFC 8033
+_______________________________________________________
