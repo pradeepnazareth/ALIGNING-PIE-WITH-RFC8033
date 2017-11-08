@@ -70,7 +70,7 @@ TypeId PieQueueDisc::GetTypeId (void)
                    MakeDoubleChecker<double> ())
     .AddAttribute ("Tupdate",
                    "Time period to calculate drop probability",
-                   TimeValue (Seconds (0.03)),
+                   TimeValue (Seconds (0.015)),
                    MakeTimeAccessor (&PieQueueDisc::m_tUpdate),
                    MakeTimeChecker ())
     .AddAttribute ("Supdate",
@@ -85,17 +85,17 @@ TypeId PieQueueDisc::GetTypeId (void)
                    MakeUintegerChecker<uint32_t> ())
     .AddAttribute ("DequeueThreshold",
                    "Minimum queue size in bytes before dequeue rate is measured",
-                   UintegerValue (10000),
+                   UintegerValue (16000),
                    MakeUintegerAccessor (&PieQueueDisc::m_dqThreshold),
                    MakeUintegerChecker<uint32_t> ())
     .AddAttribute ("QueueDelayReference",
                    "Desired queue delay",
-                   TimeValue (Seconds (0.02)),
+                   TimeValue (Seconds (0.015)),
                    MakeTimeAccessor (&PieQueueDisc::m_qDelayRef),
                    MakeTimeChecker ())
     .AddAttribute ("MaxBurstAllowance",
                    "Current max burst allowance in seconds before random drop",
-                   TimeValue (Seconds (0.1)),
+                   TimeValue (Seconds (0.15)),
                    MakeTimeAccessor (&PieQueueDisc::m_maxBurst),
                    MakeTimeChecker ())
   ;
@@ -185,23 +185,51 @@ PieQueueDisc::DoEnqueue (Ptr<QueueDiscItem> item)
   NS_LOG_FUNCTION (this << item);
 
   uint32_t nQueued = GetQueueSize ();
+  double now = Simulator::Now ().GetSeconds ();
 
   if ((GetMode () == QUEUE_DISC_MODE_PACKETS && nQueued >= m_queueLimit)
       || (GetMode () == QUEUE_DISC_MODE_BYTES && nQueued + item->GetSize () > m_queueLimit))
     {
       // Drops due to queue limit: reactive
+      
       DropBeforeEnqueue (item, FORCED_DROP);
+      m_accuProb = 0;
       return false;
     }
-  else if (DropEarly (item, nQueued))
+  else if (DropEarly (item, nQueued) && m_active == true && m_burstAllowance == 0)
     {
       // Early probability drop: proactive
       DropBeforeEnqueue (item, UNFORCED_DROP);
+      m_accuProb = 0;
       return false;
     }
 
   // No drop
   bool retval = GetInternalQueue (0)->Enqueue (item);
+  
+// If the queue is over a certain threshold , Turn ON PIE
+  if (!m_active && nQueued >= (m_queueLimit/3))
+    { 
+
+      m_active = true;
+      m_qDelayOld = Time (Seconds (0));
+      m_dropProb = 0;
+      m_inMeasurement = true;
+      m_dqCount = 0;
+      m_avgDqRate = 0;
+      m_burstAllowance = m_maxBurst;
+      m_accuProb = 0; 
+      m_dqStart = now;
+     }
+
+// If queue has been Idle for a while, Tutn OFF PIE
+//Reset Counters when accessing the queue after some idle period if PIE was active before
+   if (m_dropProb == 0 && m_qDelayOld == 0 && m_qDelay == 0)
+      {
+        m_active = false;
+        m_inMeasurement = false ;
+      } 
+
 
   // If Queue::Enqueue fails, QueueDisc::DropBeforeEnqueue is called by the
   // internal queue because QueueDisc::AddInternalQueue sets the trace callback
@@ -223,6 +251,8 @@ PieQueueDisc::InitializeParams (void)
   m_dqStart = 0;
   m_burstState = NO_BURST;
   m_qDelayOld = Time (Seconds (0));
+  m_accuProb=0; // newley added variable RFC 8033
+  m_active=false;
 }
 
 bool PieQueueDisc::DropEarly (Ptr<QueueDiscItem> item, uint32_t qSize)
@@ -263,6 +293,25 @@ bool PieQueueDisc::DropEarly (Ptr<QueueDiscItem> item, uint32_t qSize)
     {
       return false;
     }
+//added as per RFC 8033  
+if(m_dropProb == 0)
+     {
+       m_accuProb = 0;
+     } 
+   m_accuProb += m_dropProb ;
+   if(m_accuProb < 0.85)
+    {
+       return false;
+    }
+    if(m_accuProb >= 8.5) 
+    {
+       return true;
+    }
+    if(u < m_dropProb)
+     {
+       m_accuProb = 0;
+       return true;
+     }
 
   if (u > p)
     {
@@ -301,7 +350,20 @@ void PieQueueDisc::CalculateP ()
   else
     {
       p = m_a * (qDelay.GetSeconds () - m_qDelayRef.GetSeconds ()) + m_b * (qDelay.GetSeconds () - m_qDelayOld.GetSeconds ());
-      if (m_dropProb < 0.001)
+      
+       if (m_dropProb < 0.000001)
+        {
+          p /= 2048;
+        }
+      else if (m_dropProb < 0.00001)
+        {
+          p /= 512;
+        }
+      else if (m_dropProb < 0.0001)
+        {
+          p /= 128;
+        }       
+      else if (m_dropProb < 0.001)
         {
           p /= 32;
         }
@@ -345,15 +407,27 @@ void PieQueueDisc::CalculateP ()
     }
 
   m_dropProb = (p > 0) ? p : 0;
-  if (m_burstAllowance < m_tUpdate)
+ 
+ /*if (m_burstAllowance < m_tUpdate)
     {
       m_burstAllowance =  Time (Seconds (0));
     }
   else
     {
       m_burstAllowance -= m_tUpdate;
-    }
+    } */
 
+  if (m_burstAllowance > 0)
+    { 
+       if (m_burstAllowance > m_tUpdate)
+        {
+          m_burstAllowance -= m_tUpdate;
+        }
+       else 
+        {
+          m_burstAllowance= Time (Seconds (0));
+        }
+    }
   uint32_t burstResetLimit = BURST_RESET_TIMEOUT / m_tUpdate.GetSeconds ();
   if ( (qDelay.GetSeconds () < 0.5 * m_qDelayRef.GetSeconds ()) && (m_qDelayOld.GetSeconds () < (0.5 * m_qDelayRef.GetSeconds ())) && (m_dropProb == 0) && !missingInitFlag )
     {
@@ -428,8 +502,11 @@ PieQueueDisc::DoDequeue ()
                   m_avgDqRate = m_dqCount / tmp;
                 }
               else
-                {
-                  m_avgDqRate = (0.5 * m_avgDqRate) + (0.5 * (m_dqCount / tmp));
+                { 
+                  //weight= m_dqThreshold/2^16, where m_dqThreshold=2^14
+                 //so weight = 0.25 
+                  
+                  m_avgDqRate = (0.75 * m_avgDqRate) + (0.25 * (m_dqCount / tmp));
                 }
             }
 
@@ -442,7 +519,7 @@ PieQueueDisc::DoDequeue ()
             }
           else
             {
-              m_dqCount = 0;
+              m_dqCount = -1;
               m_inMeasurement = false;
             }
         }

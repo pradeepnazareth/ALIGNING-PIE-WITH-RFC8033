@@ -70,6 +70,8 @@ public:
   /**
    * \brief Burst types
    */
+
+  
   enum BurstStateT
   {
     NO_BURST,
@@ -181,6 +183,8 @@ private:
   uint32_t m_dqThreshold;                       //!< Minimum queue size in bytes before dequeue rate is measured
 
   // ** Variables maintained by PIE
+  double m_accuProb;                        //!< Accumulated drop probability
+  bool m_active;                                //!< To set PIE active/deactive
   double m_dropProb;                            //!< Variable used in calculation of drop probability
   Time m_qDelayOld;                             //!< Old value of queue delay
   Time m_qDelay;                                //!< Current value of queue delay
