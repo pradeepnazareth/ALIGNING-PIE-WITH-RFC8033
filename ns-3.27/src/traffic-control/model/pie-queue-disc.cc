@@ -85,7 +85,7 @@ TypeId PieQueueDisc::GetTypeId (void)
                    MakeUintegerChecker<uint32_t> ())
     .AddAttribute ("DequeueThreshold",
                    "Minimum queue size in bytes before dequeue rate is measured",
-                   UintegerValue (16000),
+                   UintegerValue (16384),
                    MakeUintegerAccessor (&PieQueueDisc::m_dqThreshold),
                    MakeUintegerChecker<uint32_t> ())
     .AddAttribute ("QueueDelayReference",
@@ -98,6 +98,33 @@ TypeId PieQueueDisc::GetTypeId (void)
                    TimeValue (Seconds (0.15)),
                    MakeTimeAccessor (&PieQueueDisc::m_maxBurst),
                    MakeTimeChecker ())
+    .AddAttribute ("MaxEcnMarkingThreshold",
+                   "Max ECN marking threshold (default 10%)",
+                   DoubleValue (0.1),
+                   MakeDoubleAccessor (&PieQueueDisc::m_maxEcnTh),
+                   MakeDoubleChecker<double> ())
+    .AddAttribute ("UseEcn",
+                   "True to use ECN (packets are marked instead of being dropped)",
+                   BooleanValue (false),
+                   MakeBooleanAccessor (&PieQueueDisc::m_useEcn),
+                   MakeBooleanChecker ())  
+    .AddAttribute ("UseActiveness",
+                   "True to enable PIE active",
+                   BooleanValue (false),
+                   MakeBooleanAccessor (&PieQueueDisc::m_useActive),
+                   MakeBooleanChecker ())
+    .AddAttribute ("UseDerandomization",
+                   "True to enable Derandomization",
+                   BooleanValue (false),
+                   MakeBooleanAccessor (&PieQueueDisc::m_useDerandomization),
+                   MakeBooleanChecker ())
+    .AddAttribute ("UseCapDropAdjustment",
+                   "True to enable Cap drop adjustment",
+                   BooleanValue (false),
+                   MakeBooleanAccessor (&PieQueueDisc::m_useCapDrop),
+                   MakeBooleanChecker ())
+                     
+
   ;
 
   return tid;
@@ -196,21 +223,24 @@ PieQueueDisc::DoEnqueue (Ptr<QueueDiscItem> item)
       m_accuProb = 0;
       return false;
     }
-  else if (DropEarly (item, nQueued) && m_active == true && m_burstAllowance == 0)
+  else if (m_useActive == true && DropEarly (item, nQueued) && m_burstAllowance == 0 )
     {
+      if(m_dropProb >=  m_maxEcnTh || !m_useEcn || !Mark(item, UNFORCED_MARK))
+        {
+          DropBeforeEnqueue (item, UNFORCED_DROP);
+          m_accuProb = 0;
+        }
       // Early probability drop: proactive
-      DropBeforeEnqueue (item, UNFORCED_DROP);
-      m_accuProb = 0;
+     
       return false;
     }
 
   // No drop
   bool retval = GetInternalQueue (0)->Enqueue (item);
   
-// If the queue is over a certain threshold , Turn ON PIE
-  if (!m_active && nQueued >= (m_queueLimit/3))
+  // If the queue is over a certain threshold , Turn ON PIE
+  if (!m_useActive && !m_active && nQueued >= (m_queueLimit/3))
     { 
-
       m_active = true;
       m_qDelayOld = Time (Seconds (0));
       m_dropProb = 0;
@@ -220,17 +250,15 @@ PieQueueDisc::DoEnqueue (Ptr<QueueDiscItem> item)
       m_burstAllowance = m_maxBurst;
       m_accuProb = 0; 
       m_dqStart = now;
-     }
+    }
 
-// If queue has been Idle for a while, Tutn OFF PIE
-//Reset Counters when accessing the queue after some idle period if PIE was active before
-   if (m_dropProb == 0 && m_qDelayOld == 0 && m_qDelay == 0)
-      {
-        m_active = false;
-        m_inMeasurement = false ;
-      } 
-
-
+  // If queue has been Idle for a while, Tutn OFF PIE
+  //Reset Counters when accessing the queue after some idle period if PIE was active before
+  if (m_dropProb == 0 && m_qDelayOld == 0 && m_qDelay == 0)
+    {
+      m_active = false;
+      m_inMeasurement = false ;
+    }
   // If Queue::Enqueue fails, QueueDisc::DropBeforeEnqueue is called by the
   // internal queue because QueueDisc::AddInternalQueue sets the trace callback
 
@@ -251,8 +279,9 @@ PieQueueDisc::InitializeParams (void)
   m_dqStart = 0;
   m_burstState = NO_BURST;
   m_qDelayOld = Time (Seconds (0));
-  m_accuProb=0; // newley added variable RFC 8033
-  m_active=false;
+  // newley added variable RFC 8033
+  m_accuProb = 0; 
+  m_active = false;
 }
 
 bool PieQueueDisc::DropEarly (Ptr<QueueDiscItem> item, uint32_t qSize)
@@ -278,9 +307,9 @@ bool PieQueueDisc::DropEarly (Ptr<QueueDiscItem> item, uint32_t qSize)
     {
       p = p * packetSize / m_meanPktSize;
     }
-  bool earlyDrop = true;
-  double u =  m_uv->GetValue ();
-
+    bool earlyDrop = true;
+    double u =  m_uv->GetValue ();
+  
   if ((m_qDelayOld.GetSeconds () < (0.5 * m_qDelayRef.GetSeconds ())) && (m_dropProb < 0.2))
     {
       return false;
@@ -293,37 +322,44 @@ bool PieQueueDisc::DropEarly (Ptr<QueueDiscItem> item, uint32_t qSize)
     {
       return false;
     }
-//added as per RFC 8033  
-if(m_dropProb == 0)
-     {
-       m_accuProb = 0;
-     } 
-   m_accuProb += m_dropProb ;
-   if(m_accuProb < 0.85)
-    {
-       return false;
-    }
-    if(m_accuProb >= 8.5) 
-    {
-       return true;
-    }
-    if(u < m_dropProb)
-     {
-       m_accuProb = 0;
-       return true;
-     }
+  if(!m_useDerandomization)
+    {  
+      if (u > p)
+        {
+          earlyDrop = false;
+        }
+      if (!earlyDrop)
+        {
+          return false;
+        }
 
-  if (u > p)
-    {
-      earlyDrop = false;
-    }
-  if (!earlyDrop)
-    {
-      return false;
-    }
-
-  return true;
-}
+   return true;
+    } 
+  //Derandomization
+   if(m_dropProb == 0)
+        {
+          m_accuProb = 0;
+        } 
+      m_accuProb += m_dropProb ;
+      if(m_accuProb < 0.85)
+        {
+          return false;
+        }
+      if(m_accuProb >= 8.5) 
+        {
+          return true;
+        }
+      if(u < m_dropProb)
+        {
+       m_accuProb = 0;
+      return true;
+        }
+      else
+        {
+          return false;
+        }
+          
+ }
 
 void PieQueueDisc::CalculateP ()
 {
@@ -351,7 +387,7 @@ void PieQueueDisc::CalculateP ()
     {
       p = m_a * (qDelay.GetSeconds () - m_qDelayRef.GetSeconds ()) + m_b * (qDelay.GetSeconds () - m_qDelayOld.GetSeconds ());
       
-       if (m_dropProb < 0.000001)
+      if (m_dropProb < 0.000001)
         {
           p /= 2048;
         }
@@ -375,6 +411,9 @@ void PieQueueDisc::CalculateP ()
         {
           p /= 2;
         }
+      
+     //Following code not in RFC 8033
+     
       else if (m_dropProb < 1)
         {
           p /= 0.5;
@@ -387,6 +426,9 @@ void PieQueueDisc::CalculateP ()
         {
           p /= 0.03125;
         }
+      
+      if (m_useCapDrop)
+      
       if ((m_dropProb >= 0.1) && (p > 0.02))
         {
           p = 0.02;
@@ -407,27 +449,16 @@ void PieQueueDisc::CalculateP ()
     }
 
   m_dropProb = (p > 0) ? p : 0;
- 
- /*if (m_burstAllowance < m_tUpdate)
+  if (m_burstAllowance < m_tUpdate)
     {
       m_burstAllowance =  Time (Seconds (0));
     }
   else
     {
       m_burstAllowance -= m_tUpdate;
-    } */
+    } 
+ 
 
-  if (m_burstAllowance > 0)
-    { 
-       if (m_burstAllowance > m_tUpdate)
-        {
-          m_burstAllowance -= m_tUpdate;
-        }
-       else 
-        {
-          m_burstAllowance= Time (Seconds (0));
-        }
-    }
   uint32_t burstResetLimit = BURST_RESET_TIMEOUT / m_tUpdate.GetSeconds ();
   if ( (qDelay.GetSeconds () < 0.5 * m_qDelayRef.GetSeconds ()) && (m_qDelayOld.GetSeconds () < (0.5 * m_qDelayRef.GetSeconds ())) && (m_dropProb == 0) && !missingInitFlag )
     {
@@ -519,7 +550,7 @@ PieQueueDisc::DoDequeue ()
             }
           else
             {
-              m_dqCount = -1;
+              m_dqCount = 0;
               m_inMeasurement = false;
             }
         }

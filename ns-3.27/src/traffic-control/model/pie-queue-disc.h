@@ -137,6 +137,11 @@ public:
   // Reasons for dropping packets
   static constexpr const char* UNFORCED_DROP = "Unforced drop";  //!< Early probability drops: proactive
   static constexpr const char* FORCED_DROP = "Forced drop";      //!< Drops due to queue limit: reactive
+  // Reasons for marking packets
+  static constexpr const char* UNFORCED_MARK = "Unforced mark";  //!< Early probability marks
+  static constexpr const char* FORCED_MARK = "Forced mark";      //!< Forced marks, m_qAvg > m_maxTh
+
+
 
 protected:
   /**
@@ -178,12 +183,18 @@ private:
   Time m_qDelayRef;                             //!< Desired queue delay
   uint32_t m_meanPktSize;                       //!< Average packet size in bytes
   Time m_maxBurst;                              //!< Maximum burst allowed before random early dropping kicks in
+  double m_maxEcnTh;                            //!< Max ECN marking threshold (default 10%)
   double m_a;                                   //!< Parameter to pie controller
   double m_b;                                   //!< Parameter to pie controller
   uint32_t m_dqThreshold;                       //!< Minimum queue size in bytes before dequeue rate is measured
+  bool m_useEcn;                                //!< True if ECN is used (packets are marked instead of being dropped)
+  bool m_useActive;                             //!< True if PIE active
+  bool m_useDerandomization;                    //!< True if Derandomization used
+  bool m_useCapDrop;                            //!< True if Capdrop adjustment used
+
 
   // ** Variables maintained by PIE
-  double m_accuProb;                        //!< Accumulated drop probability
+  double m_accuProb;                            //!< Accumulated drop probability
   bool m_active;                                //!< To set PIE active/deactive
   double m_dropProb;                            //!< Variable used in calculation of drop probability
   Time m_qDelayOld;                             //!< Old value of queue delay
